@@ -550,9 +550,6 @@ func (m *Manager) worker() {
 
 			// Increment the send rate or the error counter if there was an error.
 			if msg.pipe != nil {
-				// Mark the message as done.
-				msg.pipe.wg.Done()
-
 				if err != nil {
 					// Call the error callback, which keeps track of the error count
 					// and stops the campaign if the error count exceeds the threshold.
@@ -565,6 +562,9 @@ func (m *Manager) worker() {
 					msg.pipe.rate.Incr(1)
 					msg.pipe.sent.Add(1)
 				}
+
+				// Cleanup must not run until this message's counters are updated.
+				msg.pipe.wg.Done()
 			}
 
 		// Arbitrary message.
@@ -595,10 +595,9 @@ func (m *Manager) getCurrentCampaigns() ([]int64, []int64) {
 	for _, p := range m.pipes {
 		ids = append(ids, int64(p.camp.ID))
 
-		// Get the sent counts for campaigns and reset them to 0
-		// as in the database, they're stored cumulatively (sent += $newSent).
-		counts = append(counts, p.sent.Load())
-		p.sent.Store(0)
+		// Transfer each sent message exactly once to the cumulative DB count.
+		// Cleanup can run concurrently with this periodic checkpoint.
+		counts = append(counts, p.sent.Swap(0))
 	}
 
 	return ids, counts

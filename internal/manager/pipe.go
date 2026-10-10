@@ -196,8 +196,9 @@ func (p *pipe) cleanup() {
 		p.m.pipesMut.Unlock()
 	}()
 
-	// Update campaign's 'sent count.
-	if err := p.m.store.UpdateCampaignCounts(p.camp.ID, 0, int(p.sent.Load()), int(p.lastID.Load())); err != nil {
+	// Atomically take the remaining count so a concurrent checkpoint cannot
+	// persist the same messages again.
+	if err := p.m.store.UpdateCampaignCounts(p.camp.ID, 0, int(p.sent.Swap(0)), int(p.lastID.Load())); err != nil {
 		p.m.log.Printf("error updating campaign counts (%s): %v", p.camp.Name, err)
 	}
 
