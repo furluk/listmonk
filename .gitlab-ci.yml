@@ -1,0 +1,57 @@
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - when: never
+
+stages:
+  - test
+  - build
+
+unit-tests:
+  stage: test
+  image: golang:1.26.1-alpine3.22@sha256:07e91d24f6330432729082bb580983181809e0a48f0f38ecde26868d4568c6ac
+  variables:
+    CGO_ENABLED: "0"
+  script:
+    - |
+      set -eu
+      test "$(go list -m -f '{{.Replace.Path}}' github.com/knadh/smtppool/v2)" = "./third_party/smtppool"
+      go test ./...
+      (cd third_party/smtppool && go test -count=1 pool.go email.go hin_test.go)
+
+build-and-push:
+  stage: build
+  image: docker:27
+  needs:
+    - unit-tests
+  script:
+    - |
+      set -eu
+
+      # Keep Git tags exact, but reject names that cannot be Docker image tags.
+      if [ -n "${CI_COMMIT_TAG:-}" ]; then
+        if [ "$CI_COMMIT_TAG" = latest ] || ! printf '%s' "$CI_COMMIT_TAG" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'; then
+          echo "Git tag is not a valid Docker image tag: $CI_COMMIT_TAG" >&2
+          exit 1
+        fi
+      fi
+
+      image="$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+      docker build --pull --platform linux/amd64 -f Dockerfile.hin \
+        --build-arg LISTMONK_VERSION=v6.2.0 \
+        --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \
+        -t "$image" .
+      test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = "linux/amd64"
+      test "$(docker run --rm --platform linux/amd64 --entrypoint ./listmonk "$image" --version)" = "v6.2.0"
+
+      printf '%s' "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" \
+        --username "$CI_REGISTRY_USER" --password-stdin
+      docker push "$image"
+
+      if [ -n "${CI_COMMIT_TAG:-}" ]; then
+        docker tag "$image" "$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG"
+        docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG"
+      elif [ "${CI_COMMIT_BRANCH:-}" = "$CI_DEFAULT_BRANCH" ]; then
+        docker tag "$image" "$CI_REGISTRY_IMAGE:latest"
+        docker push "$CI_REGISTRY_IMAGE:latest"
+      fi
