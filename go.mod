@@ -1,5 +1,7 @@
 module github.com/knadh/listmonk
 
+replace github.com/knadh/smtppool/v2 => ./third_party/smtppool
+
 go 1.26.1
 
 require (

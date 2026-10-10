@@ -1,0 +1,43 @@
+# Build the frontend and email builder from the release's locked dependencies.
+FROM node:22-alpine3.22@sha256:cd7807368cf24826297cbad5dca1a44972ccfd770647db52a8c7589eb4599ac8 AS frontend
+WORKDIR /src
+COPY frontend/ frontend/
+RUN mkdir -p static/public/static \
+    && corepack enable \
+    && cd frontend/email-builder \
+    && yarn install --frozen-lockfile \
+    && yarn build \
+    && mkdir -p ../public/static/email-builder \
+    && cp -a dist/. ../public/static/email-builder/ \
+    && cd .. \
+    && yarn install --frozen-lockfile \
+    && yarn build
+
+FROM golang:1.26.1-alpine3.22@sha256:07e91d24f6330432729082bb580983181809e0a48f0f38ecde26868d4568c6ac AS builder
+WORKDIR /src
+COPY . .
+COPY --from=frontend /src/frontend/dist/ frontend/dist/
+COPY --from=frontend /src/frontend/public/static/email-builder/ frontend/public/static/email-builder/
+COPY --from=frontend /src/static/public/static/altcha.umd.js static/public/static/altcha.umd.js
+ARG LISTMONK_VERSION=v6.2.0
+RUN cd third_party/smtppool \
+    && go test -count=1 pool.go email.go hin_test.go
+RUN go install github.com/knadh/stuffbin/...
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false \
+    -ldflags="-s -w -X main.versionString=${LISTMONK_VERSION} -X main.buildString=${LISTMONK_VERSION}" \
+    -o /out/listmonk ./cmd \
+    && /go/bin/stuffbin -a stuff -in /out/listmonk -out /out/listmonk \
+        config.toml.sample schema.sql queries:/queries permissions.json \
+        static/public:/public static/email-templates frontend/dist:/admin i18n:/i18n \
+    && go version -m /out/listmonk | grep 'third_party/smtppool'
+
+FROM alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+RUN apk --no-cache add ca-certificates tzdata shadow su-exec
+WORKDIR /listmonk
+COPY --from=builder /out/listmonk ./listmonk
+COPY config.toml.sample ./config.toml
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+EXPOSE 9000
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["./listmonk"]
